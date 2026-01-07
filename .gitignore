@@ -1,0 +1,75 @@
+# --- Security (CRITICAL) ---
+# Never commit your real API keys or secrets
+.env
+.env.local
+.env.*.local
+! .env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Virtual Environments ---
+# Commonly used names for virtual envs
+venv/
+.venv/
+env/
+.env/
+
+# --- IDE & Editors ---
+# VS Code
+.vscode/
+# PyCharm / IntelliJ
+.idea/
+# Mac OS
+.DS_Store
+
+# --- Distribution / Builds ---
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- Testing & Coverage ---
+.coverage
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Supabase / Local Dev ---
+# If you use local supabase CLI
+supabase/functions/*/deno.lock
+supabase/.temp/
+
+# --- Jupyter Notebooks (Optional) ---
+.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# --- MyPy (Type Checking) ---
+.mypy_cache/
+.dmypy.json
+dmypy.json
