@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from typing import Optional
 from uuid import UUID
 
@@ -26,5 +26,5 @@ class UserResponse(UserBase):
     id: UUID
     avatar_url: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    # Pydantic V2 Configuration
+    model_config = ConfigDict(from_attributes=True)
