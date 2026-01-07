@@ -167,7 +167,3 @@ To prevent context window overflow while keeping costs low, the backend employs 
 ---
 
 *Built with ❤️ using Python & Supabase.*
-
-```
-
-```
