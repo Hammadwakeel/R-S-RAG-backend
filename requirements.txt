@@ -18,3 +18,5 @@ pytest-asyncio
 langgraph-checkpoint-postgres
 psycopg-pool
 groq
+
+gotrue
