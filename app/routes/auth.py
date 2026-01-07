@@ -1,44 +1,50 @@
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.security import OAuth2PasswordRequestForm
 from typing import Any
-
-from app.schemas.user import UserSignUp, UserLogin
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from app.schemas.user import UserSignUp, UserLogin, UserResponse
+from app.schemas.auth import Token
 from app.services.auth_service import AuthService
 
 router = APIRouter()
 
-# --- JSON Login (For your Frontend/Mobile App) ---
-@router.post("/signup")
-async def sign_up(user: UserSignUp):
-    result = AuthService.sign_up(user)
-    return {"message": "User created", "user": result.user}
+@router.post("/signup", response_model=UserResponse)
+async def sign_up(user_data: UserSignUp):
+    """
+    Register a new user. 
+    """
+    # Service returns the raw Supabase User object
+    auth_response = await AuthService.sign_up(user_data)
+    
+    # We map it to our Pydantic Schema
+    if not auth_response.user:
+        raise HTTPException(status_code=400, detail="Signup failed")
+        
+    return auth_response.user
 
-@router.post("/login")
-async def login(user: UserLogin):
-    result = AuthService.login(user)
+@router.post("/login", response_model=Token)
+async def login(user_data: UserLogin):
+    """
+    Standard JSON Login.
+    """
+    auth_response = await AuthService.login(user_data)
+    
     return {
-        "access_token": result.session.access_token,
-        "refresh_token": result.session.refresh_token,
-        "user": result.user
+        "access_token": auth_response.session.access_token,
+        "token_type": "bearer",
+        "user": auth_response.user,
+        "refresh_token": auth_response.session.refresh_token
     }
 
-# --- Swagger UI Login (Form Data) ---
 @router.post("/login/swagger", include_in_schema=False)
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()) -> Any:
+async def login_swagger(form_data: OAuth2PasswordRequestForm = Depends()) -> Any:
     """
-    Specific endpoint for Swagger UI Authorization.
-    Swagger sends 'username' and 'password' as form fields.
-    We map 'username' -> 'email' for Supabase.
+    Hidden endpoint strictly for Swagger UI 'Authorize' button.
+    It accepts Form Data (username/password) instead of JSON.
     """
-    try:
-        # Create a UserLogin object from the form data
-        user_data = UserLogin(email=form_data.username, password=form_data.password)
-        result = AuthService.login(user_data)
-        
-        # Return exact format expected by OAuth2 spec
-        return {
-            "access_token": result.session.access_token,
-            "token_type": "bearer"
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail="Incorrect email or password")
+    user_data = UserLogin(email=form_data.username, password=form_data.password)
+    auth_response = await AuthService.login(user_data)
+    
+    return {
+        "access_token": auth_response.session.access_token,
+        "token_type": "bearer"
+    }
