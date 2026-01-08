@@ -2,8 +2,9 @@ import asyncio
 import logging
 from fastapi import HTTPException, status
 from gotrue.errors import AuthApiError
-from app.core.database import supabase
-from app.schemas.user import UserSignUp, UserLogin, UserResponse
+# 1. CHANGE THIS IMPORT
+import app.core.database as db 
+from app.schemas.user import UserSignUp, UserLogin
 
 logger = logging.getLogger(__name__)
 
@@ -15,10 +16,15 @@ class AuthService:
         Registers a new user.
         Wraps blocking Supabase call in a thread.
         """
+        # 2. Add Safety Check
+        if not db.supabase:
+            logger.error("❌ Database not initialized")
+            raise HTTPException(status_code=500, detail="Database unavailable")
+
         try:
-            # 1. Run blocking I/O in a thread
+            # 3. Use 'db.supabase' instead of just 'supabase'
             auth_response = await asyncio.to_thread(
-                supabase.auth.sign_up,
+                db.supabase.auth.sign_up,
                 {
                     "email": user_data.email, 
                     "password": user_data.password,
@@ -28,15 +34,11 @@ class AuthService:
                 }
             )
             
-            # 2. Validate Response
             if not auth_response.user:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST, 
                     detail="Registration failed. No user returned."
                 )
-            
-            # 3. Create Profile (Optional - trigger often handles this, but good to be safe)
-            # You might want to call UserService here if you don't use SQL Triggers
             
             return auth_response
 
@@ -53,14 +55,18 @@ class AuthService:
         Authenticates a user.
         Wraps blocking Supabase call in a thread.
         """
+        # 2. Add Safety Check
+        if not db.supabase:
+            logger.error("❌ Database not initialized")
+            raise HTTPException(status_code=500, detail="Database unavailable")
+
         try:
-            # 1. Run blocking I/O in a thread
+            # 3. Use 'db.supabase' instead of just 'supabase'
             auth_response = await asyncio.to_thread(
-                supabase.auth.sign_in_with_password,
+                db.supabase.auth.sign_in_with_password,
                 {"email": user_data.email, "password": user_data.password}
             )
 
-            # 2. Validate Response
             if not auth_response.session:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED, 

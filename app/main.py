@@ -7,8 +7,6 @@ from app.core.database import init_db_clients
 from app.routes import auth, users, chat
 
 # --- 1. Setup Logging ---
-# It's better to rely on Uvicorn's loggers in production, 
-# but this ensures we see our app logs during dev.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -20,27 +18,25 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Execute logic on startup and shutdown.
-    Ref: https://fastapi.tiangolo.com/advanced/events/
+    Executes on Startup.
+    This ensures DB clients are ready BEFORE requests come in.
     """
-    # STARTUP: Initialize Database & AI Clients safely
+    # 1. Initialize DB & AI Clients
     init_db_clients()
     
     yield
     
-    # SHUTDOWN: (Optional) Close connections here if needed
-    logger.info("🛑 Shutting down application...")
+    # 2. Shutdown logic
+    logger.info("🛑 Shutting down...")
 
 # --- 3. App Definition ---
+# Create the app ONCE with the lifespan handler
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    lifespan=lifespan,
-    # Disable auto-docs in production if needed
-    # docs_url=None if settings.ENV_MODE == "production" else "/docs"
+    lifespan=lifespan 
 )
 
 # --- 4. Secure CORS ---
-# Only allow origins defined in .env (e.g., http://localhost:3000)
 if settings.BACKEND_CORS_ORIGINS:
     app.add_middleware(
         CORSMiddleware,
@@ -51,20 +47,21 @@ if settings.BACKEND_CORS_ORIGINS:
     )
 
 # --- 5. Include Routers ---
-# Group all endpoints under /api/v1
-api_router = FastAPI()
+# We use a separate Router for API v1 to group everything
+from fastapi import APIRouter
+api_router = APIRouter()
+
 api_router.include_router(auth.router, prefix="/auth", tags=["Auth"])
 api_router.include_router(users.router, prefix="/users", tags=["Users"])
 api_router.include_router(chat.router, prefix="/chat", tags=["Chat"])
 
-app.mount(settings.API_V1_STR, api_router)
+# Mount the API router under /api/v1
+app.include_router(api_router, prefix=settings.API_V1_STR)
 
 @app.get("/health")
 def health_check():
-    """Simple health check for load balancers"""
     return {"status": "ok", "app": settings.PROJECT_NAME}
 
 if __name__ == "__main__":
     import uvicorn
-    # Use config settings for host/port if available, else default
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)

@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Union
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import AnyHttpUrl, field_validator
 
@@ -7,10 +7,13 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "RAG AI Backend"
     
     # CORS
-    BACKEND_CORS_ORIGINS: List[AnyHttpUrl] = []
+    # Defined as Union[List, str] to prevent Pydantic from crashing 
+    # if it sees a comma-separated string in .env
+    BACKEND_CORS_ORIGINS: Union[List[AnyHttpUrl], str] = []
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
-    def assemble_cors_origins(cls, v: str | List[str]) -> List[str] | str:
+    @classmethod
+    def assemble_cors_origins(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
         if isinstance(v, str) and not v.startswith("["):
             return [i.strip() for i in v.split(",")]
         elif isinstance(v, (list, str)):
@@ -28,7 +31,15 @@ class Settings(BaseSettings):
     # AI Keys
     GROQ_API_KEY: str
     VOYAGE_API_KEY: str
-    GOOGLE_API_KEY: str = ""
+    GOOGLE_API_KEY: str = "" # Optional fallback
+
+    # --- AI Model Config (Groq & Voyage) ---
+
+    MODEL_FAST: str 
+    # Pro model for Generation 
+    MODEL_PRO: str
+    # Embedding Model
+    EMBEDDING_MODEL: str
 
     # Pydantic V2 Settings Config
     model_config = SettingsConfigDict(
