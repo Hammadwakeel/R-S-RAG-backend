@@ -16,10 +16,10 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
-# Properties to receive via API on update
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     avatar_url: Optional[str] = None
+    password: Optional[str] = None  # <--- Make sure this exists!
 
 # Properties to return to client
 class UserResponse(UserBase):

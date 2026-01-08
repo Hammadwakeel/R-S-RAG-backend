@@ -1,84 +1,141 @@
-import asyncio
 import logging
-from typing import Optional
+import base64
 from uuid import UUID
-from fastapi import HTTPException, status
-from app.core.database import supabase
-from app.schemas.user import UserUpdate as ProfileUpdate
+from fastapi import HTTPException
+import app.core.database as db 
+from app.schemas.user import UserUpdate
 
 logger = logging.getLogger(__name__)
 
 class UserService:
     
     @staticmethod
-    async def get_or_create_profile(user_id: UUID, email: str, full_name: Optional[str] = None) -> dict:
+    def _upload_avatar_to_storage(user_id: str, base64_image: str) -> str:
         """
-        Fetches a profile or creates one if it doesn't exist.
-        Wraps blocking I/O in a thread.
+        Decodes Base64 image, uploads to Supabase Storage 'avatars' bucket,
+        and returns a Signed URL.
         """
         try:
-            # 1. Try to Fetch Existing Profile
-            response = await asyncio.to_thread(
-                supabase.table("profiles").select("*").eq("id", str(user_id)).execute
-            )
-            
-            # Supabase SDK v2 returns 'data' as a list of dicts
-            if response.data and len(response.data) > 0:
-                return response.data[0]
+            if "," in base64_image:
+                header, encoded = base64_image.split(",", 1)
+                file_ext = header.split(";")[0].split("/")[1]
+            else:
+                encoded = base64_image
+                file_ext = "png"
 
-            # 2. Create Profile if missing
-            logger.info(f"👤 Creating profile for User {user_id}")
+            file_data = base64.b64decode(encoded)
+            file_path = f"{user_id}/avatar.{file_ext}"
+
+            bucket = db.supabase.storage.from_("avatars")
             
-            new_profile = {
-                "id": str(user_id),
-                "email": email,
-                "full_name": full_name or email.split("@")[0]
-            }
-            
-            create_res = await asyncio.to_thread(
-                supabase.table("profiles").insert(new_profile).execute
+            try:
+                bucket.remove([file_path])
+            except:
+                pass
+
+            bucket.upload(
+                path=file_path,
+                file=file_data,
+                file_options={"content-type": f"image/{file_ext}", "upsert": "true"}
             )
+
+            # Generate Signed URL (valid for 10 years approx)
+            response = bucket.create_signed_url(file_path, 315360000)
             
-            if not create_res.data:
-                raise HTTPException(status_code=500, detail="Failed to create profile")
-                
-            return create_res.data[0]
+            if isinstance(response, dict) and "signedURL" in response:
+                return response["signedURL"]
+            return response
+
+        except Exception as e:
+            logger.error(f"❌ Avatar Upload Error: {e}")
+            return None
+
+    @staticmethod
+    async def get_user_profile(user_id: UUID):
+        if not db.supabase:
+            logger.error("Database client is not initialized")
+            raise HTTPException(status_code=503, detail="Database unavailable")
+
+        try:
+            response = db.supabase.table("profiles").select("*").eq("id", str(user_id)).single().execute()
+            
+            if response.data:
+                return response.data
+            
+            return {
+                "id": str(user_id),
+                "full_name": "",
+                "avatar_url": "",
+                "email": "" 
+            }
 
         except Exception as e:
             logger.error(f"❌ Profile Error: {e}")
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Profile operation failed")
+            raise HTTPException(status_code=500, detail="Failed to fetch profile")
 
     @staticmethod
-    async def get_profile(user_id: UUID) -> dict:
-        """Get profile by ID"""
-        try:
-            response = await asyncio.to_thread(
-                supabase.table("profiles").select("*").eq("id", str(user_id)).single().execute
-            )
-            return response.data
-        except Exception as e:
-            logger.error(f"❌ Failed to fetch profile {user_id}: {e}")
-            raise HTTPException(status_code=404, detail="Profile not found")
+    async def update_user_profile(user_id: UUID, user_data: UserUpdate):
+        if not db.supabase:
+            raise HTTPException(status_code=503, detail="Database unavailable")
 
-    @staticmethod
-    async def update_profile(user_id: UUID, update_data: ProfileUpdate) -> dict:
-        """Update profile fields"""
         try:
-            # Filter out None values to avoid overwriting with null
-            data_to_update = {k: v for k, v in update_data.model_dump().items() if v is not None}
+            # Convert Pydantic model to dict, removing unset values
+            updates = {
+                k: v for k, v in user_data.model_dump(exclude_unset=True).items()
+            }
             
-            if not data_to_update:
-                return await UserService.get_profile(user_id)
+            if not updates:
+                return None
 
-            response = await asyncio.to_thread(
-                supabase.table("profiles").update(data_to_update).eq("id", str(user_id)).execute
-            )
-            
-            if not response.data:
-                raise HTTPException(status_code=400, detail="Update failed")
+            # ---------------------------------------------------------
+            # 🔐 FIX: Handle Password Update via Auth API
+            # ---------------------------------------------------------
+            if "password" in updates:
+                new_password = updates.pop("password") # Remove from DB updates
+                logger.info(f"🔐 Updating password for user {user_id}")
                 
-            return response.data[0]
+                try:
+                    # Use the Admin API to update the user's password securely
+                    db.supabase.auth.admin.update_user_by_id(
+                        str(user_id), 
+                        {"password": new_password}
+                    )
+                except Exception as auth_error:
+                    logger.error(f"❌ Auth Update Failed: {auth_error}")
+                    raise HTTPException(status_code=400, detail=f"Password update failed: {str(auth_error)}")
+
+            # ---------------------------------------------------------
+            # 🖼️ Handle Avatar Upload
+            # ---------------------------------------------------------
+            if "avatar_url" in updates and updates["avatar_url"].startswith("data:image"):
+                new_url = UserService._upload_avatar_to_storage(str(user_id), updates["avatar_url"])
+                if new_url:
+                    updates["avatar_url"] = new_url
+                else:
+                    del updates["avatar_url"]
             
+            # ---------------------------------------------------------
+            # 💾 Update Profile Table (Name, Avatar, etc.)
+            # ---------------------------------------------------------
+            # Only proceed if there are still fields left to update (e.g. name or avatar)
+            if updates:
+                updates["updated_at"] = "now()"
+
+                response = db.supabase.table("profiles").upsert({
+                    "id": str(user_id),
+                    **updates
+                }).execute()
+                
+                if response.data and len(response.data) > 0:
+                    return response.data[0]
+                
+                return updates
+            
+            # If only password was updated, return a basic success object
+            return {"id": str(user_id), "status": "updated"}
+
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"❌ Failed to update profile {user_id}: {e}")
-            raise HTTPException(status_code=500, detail="Server error updating profile")
+            logger.error(f"❌ Update Error: {e}")
+            raise HTTPException(status_code=500, detail="Failed to update profile")
