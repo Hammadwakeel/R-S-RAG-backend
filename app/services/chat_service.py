@@ -331,21 +331,64 @@ class ChatService:
 
     @staticmethod
     async def delete_chat(user_id: str, thread_id: str) -> bool:
+        """
+        Deletes a chat and returns True if successful.
+        Uses count='exact' to verify deletion even if no data is returned.
+        """
         try:
             if not db.supabase: return False
+            
+            # ✅ UPDATED: Added count='exact'
             res = await asyncio.to_thread(
-                db.supabase.table("chats").delete().eq("id", thread_id).eq("user_id", user_id).execute
+                db.supabase.table("chats")
+                .delete(count="exact")
+                .eq("id", thread_id)
+                .eq("user_id", user_id)
+                .execute
             )
-            return len(res.data) > 0
-        except: return False
+            
+            # ✅ UPDATED: Check count instead of data
+            if res.count is not None and res.count > 0:
+                return True
+            
+            return False
+        except Exception as e: 
+            logger.error(f"Delete Chat Error: {e}")
+            return False
 
     @staticmethod
     async def rename_chat(user_id: str, thread_id: str, new_title: str) -> Optional[dict]:
+        """
+        Renames a chat and returns the updated chat object.
+        """
         try:
             if not db.supabase: return None
+            
+            # 1. Update (✅ Removed .select() to fix AttributeError)
             res = await asyncio.to_thread(
-                db.supabase.table("chats").update({"title": new_title})\
-                    .eq("id", thread_id).eq("user_id", user_id).execute
+                db.supabase.table("chats")
+                .update({"title": new_title})
+                .eq("id", thread_id)
+                .eq("user_id", user_id)
+                .execute
             )
-            return res.data[0] if res.data else None
-        except: return None
+            
+            # 2. If data is returned immediately (Best Case)
+            if res.data and len(res.data) > 0:
+                return res.data[0]
+            
+            # 3. Fallback: If update succeeded but returned no data (Fixes 404 error)
+            # We explicitly fetch the row to ensure we return a valid object
+            refresh = await asyncio.to_thread(
+                 db.supabase.table("chats")
+                 .select("id, title, created_at")
+                 .eq("id", thread_id)
+                 .eq("user_id", user_id)
+                 .execute
+            )
+            
+            return refresh.data[0] if refresh.data else None
+
+        except Exception as e: 
+            logger.error(f"Rename Chat Error: {e}")
+            return None
