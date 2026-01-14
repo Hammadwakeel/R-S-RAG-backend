@@ -226,13 +226,12 @@ class ChatService:
 
     @staticmethod
     async def edit_message_stream(user_id: str, message_id: str, new_content: str) -> AsyncGenerator[str, None]:
-        # Re-implemented to use native Groq
         if not db.supabase or not db.groq_client:
             yield f"data: {json.dumps({'error': 'System unavailable'})}\n\n"
             return
             
-        # 1. Fetch & Verify
         try:
+            # 1. Fetch Original Message
             msg_res = await asyncio.to_thread(
                 db.supabase.table("messages").select("*").eq("id", message_id).single().execute
             )
@@ -244,31 +243,52 @@ class ChatService:
             thread_id = original_msg['chat_id']
             created_at = original_msg['created_at']
             
-            # 2. Rewind
+            # 2. Delete Future Messages (Rewind)
+            logger.info(f"Rewinding chat {thread_id} after {created_at}")
             future_msgs = await asyncio.to_thread(
-                db.supabase.table("messages").select("id").eq("chat_id", thread_id).gt("created_at", created_at).execute
+                db.supabase.table("messages")
+                .select("id")
+                .eq("chat_id", thread_id)
+                .gt("created_at", created_at)
+                .execute
             )
+            
             ids_to_delete = [m['id'] for m in future_msgs.data]
             if ids_to_delete:
-                await asyncio.to_thread(db.supabase.table("messages").delete().in_("id", ids_to_delete).execute)
+                await asyncio.to_thread(
+                    db.supabase.table("messages")
+                    .delete(count="exact")
+                    .in_("id", ids_to_delete)
+                    .execute
+                )
 
-            # Update & Reset
+            # 3. Update Target Message
+            logger.info(f"Updating message {message_id}")
             await asyncio.to_thread(
-                db.supabase.table("messages").update({"content": new_content, "is_summarized": False}).eq("id", message_id).execute
+                db.supabase.table("messages")
+                .update({"content": new_content, "is_summarized": False})
+                .eq("id", message_id)
+                .execute
             )
+            
+            # 4. Skip Strict Verification (Assume success if no exception raised above)
+            # Just reset the summary to force a refresh on next context load
             await asyncio.to_thread(
                 db.supabase.table("chats").update({"summary": ""}).eq("id", thread_id).execute
             )
             
-        except Exception:
-            yield f"data: {json.dumps({'error': 'Edit failed'})}\n\n"
+        except Exception as e:
+            logger.error(f"Edit DB Error: {e}")
+            yield f"data: {json.dumps({'error': f'Database error: {str(e)}'})}\n\n"
             return
 
-        # 3. Regenerate (Same logic as process_message_stream)
+        # 5. Regenerate AI Response
+        logger.info("Starting AI Regeneration...")
         config = {"configurable": {"thread_id": thread_id}}
         try:
             state = await asyncio.to_thread(app_graph.invoke, {"question": new_content, "thread_id": thread_id}, config)
-        except:
+        except Exception as e:
+             logger.error(f"Graph Error: {e}")
              state = {"chat_summary": "", "chat_history_recent": "", "compressed_context": ""}
 
         system_instruction = "You are a helpful AI assistant."
@@ -282,7 +302,10 @@ class ChatService:
             stream = await asyncio.to_thread(
                 db.groq_client.chat.completions.create,
                 model=settings.MODEL_PRO,
-                messages=[{"role": "system", "content": system_instruction}, {"role": "user", "content": user_content}],
+                messages=[
+                    {"role": "system", "content": system_instruction}, 
+                    {"role": "user", "content": user_content}
+                ],
                 stream=True
             )
 
@@ -292,9 +315,11 @@ class ChatService:
                     full_response += content
                     yield f"data: {json.dumps({'content': content, 'thread_id': thread_id})}\n\n"
                     await asyncio.sleep(0)
-        except Exception:
-             yield f"data: {json.dumps({'error': 'AI Error'})}\n\n"
+        except Exception as e:
+             logger.error(f"AI Stream Error: {e}")
+             yield f"data: {json.dumps({'error': f'AI Error: {str(e)}'})}\n\n"
 
+        # 6. Save AI Response
         if full_response:
              try:
                 await asyncio.to_thread(
@@ -302,9 +327,10 @@ class ChatService:
                         "chat_id": thread_id, "role": "assistant", "content": full_response
                     }).execute
                 )
-             except: pass
+             except Exception as e:
+                logger.error(f"Save AI Response Error: {e}")
+                
         yield "data: [DONE]\n\n"
-
     # --- Frontend APIs ---
 
     @staticmethod
