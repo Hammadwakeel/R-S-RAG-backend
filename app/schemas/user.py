@@ -25,6 +25,7 @@ class UserUpdate(BaseModel):
 class UserResponse(UserBase):
     id: UUID
     avatar_url: Optional[str] = None
+    role: str = "user" # ✅ Added role field
 
     # Pydantic V2 Configuration
     model_config = ConfigDict(from_attributes=True)

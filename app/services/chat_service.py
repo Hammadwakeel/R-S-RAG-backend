@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import uuid  # ✅ Added for unique titles
 from typing import List, Optional, AsyncGenerator, Dict, Any, TypedDict
 from langchain_core.documents import Document
 from langgraph.graph import StateGraph, END
@@ -42,7 +43,6 @@ def run_groq_sync(model: str, system: str, user: str) -> str:
         return ""
 
 # --- Graph Nodes ---
-
 def simple_retrieval(state: GraphState) -> Dict[str, Any]:
     logger.info("🔍 [Node] Retrieval")
     if not db.retriever:
@@ -68,13 +68,11 @@ def batch_compress(state: GraphState) -> Dict[str, Any]:
 
     raw_context = "\n\n".join([d.page_content for d in state["retrieved_docs"][:3]])
     
-    # Use Native Groq Call
     compressed = run_groq_sync(
         model=settings.MODEL_FAST,
         system="Extract relevant facts for the question.",
         user=f"Question: {state['question']}\n\nContext:\n{raw_context}"
     )
-    
     return {"compressed_context": compressed if compressed else raw_context[:1000]}
 
 def history_management(state: GraphState) -> Dict[str, Any]:
@@ -101,7 +99,6 @@ def history_management(state: GraphState) -> Dict[str, Any]:
         msgs_to_keep = active_msgs[5:]
         text_chunk = "\n".join([f"{m['role']}: {m['content']}" for m in msgs_to_summarize])
         
-        # Use Native Groq Call
         new_summary = run_groq_sync(
             model=settings.MODEL_FAST,
             system="Update the summary with these new lines. Preserve key facts.",
@@ -145,7 +142,6 @@ class ChatService:
     
     @staticmethod
     async def process_message_stream(user_id: str, message: str, thread_id: str = None) -> AsyncGenerator[str, None]:
-        # CHECK: Must have Groq Client
         if not db.supabase or not db.groq_client:
             yield f"data: {json.dumps({'error': 'System unavailable'})}\n\n"
             return
@@ -153,19 +149,36 @@ class ChatService:
         # 1. DB Init (Async Wrapper)
         try:
             if not thread_id:
+                # 🛡️ FIX 409 CONFLICT: Ensure title is unique by appending UUID
+                short_id = str(uuid.uuid4())[:8]
+                unique_title = f"{message[:30]}..." if len(message) > 30 else message
+                # If message is "Hi", title becomes "Hi (a1b2c3d4)" to satisfy DB constraint
+                final_title = f"{unique_title} ({short_id})"
+
                 res = await asyncio.to_thread(
-                    db.supabase.table("chats").insert({"user_id": user_id, "title": message[:30]}).execute
+                    db.supabase.table("chats").insert({
+                        "user_id": user_id, 
+                        "title": final_title 
+                    }).execute
                 )
+                if not res.data:
+                    raise Exception("Failed to create chat row")
                 thread_id = res.data[0]["id"]
             
+            # Insert Message
             await asyncio.to_thread(
-                db.supabase.table("messages").insert({"chat_id": thread_id, "role": "user", "content": message}).execute
+                db.supabase.table("messages").insert({
+                    "chat_id": thread_id, 
+                    "role": "user", 
+                    "content": message
+                }).execute
             )
-        except Exception:
-            yield f"data: {json.dumps({'error': 'DB Error'})}\n\n"
+        except Exception as e:
+            logger.error(f"❌ DB Init Error: {e}")
+            yield f"data: {json.dumps({'error': f'DB Error: {str(e)}'})}\n\n"
             return
 
-        # 2. Pipeline (Async Wrapper)
+        # 2. Pipeline
         config = {"configurable": {"thread_id": thread_id}}
         try:
             state = await asyncio.to_thread(app_graph.invoke, {"question": message, "thread_id": thread_id}, config)
@@ -185,12 +198,6 @@ class ChatService:
 
         full_response = ""
         try:
-            # Native Stream Call (Wrapped in thread because .create() is blocking by default, 
-            # but we can iterate the generator in the thread or use stream=True)
-            
-            # NOTE: Groq's python client stream=True returns a sync generator.
-            # To make it truly async-friendly in FastAPI, we can iterate it.
-            
             stream = await asyncio.to_thread(
                 db.groq_client.chat.completions.create,
                 model=settings.MODEL_PRO,
@@ -206,12 +213,11 @@ class ChatService:
                     content = chunk.choices[0].delta.content
                     full_response += content
                     yield f"data: {json.dumps({'content': content, 'thread_id': thread_id})}\n\n"
-                    # Small sleep to allow event loop to breathe if needed
                     await asyncio.sleep(0)
 
         except Exception as e:
             logger.critical(f"Streaming Error: {e}")
-            yield f"data: {json.dumps({'error': 'AI Error'})}\n\n"
+            yield f"data: {json.dumps({'error': f'AI Error: {str(e)}'})}\n\n"
             
         finally:
             if full_response:
@@ -231,7 +237,6 @@ class ChatService:
             return
             
         try:
-            # 1. Fetch Original Message
             msg_res = await asyncio.to_thread(
                 db.supabase.table("messages").select("*").eq("id", message_id).single().execute
             )
@@ -243,8 +248,6 @@ class ChatService:
             thread_id = original_msg['chat_id']
             created_at = original_msg['created_at']
             
-            # 2. Delete Future Messages (Rewind)
-            logger.info(f"Rewinding chat {thread_id} after {created_at}")
             future_msgs = await asyncio.to_thread(
                 db.supabase.table("messages")
                 .select("id")
@@ -262,8 +265,6 @@ class ChatService:
                     .execute
                 )
 
-            # 3. Update Target Message
-            logger.info(f"Updating message {message_id}")
             await asyncio.to_thread(
                 db.supabase.table("messages")
                 .update({"content": new_content, "is_summarized": False})
@@ -271,8 +272,6 @@ class ChatService:
                 .execute
             )
             
-            # 4. Skip Strict Verification (Assume success if no exception raised above)
-            # Just reset the summary to force a refresh on next context load
             await asyncio.to_thread(
                 db.supabase.table("chats").update({"summary": ""}).eq("id", thread_id).execute
             )
@@ -282,8 +281,6 @@ class ChatService:
             yield f"data: {json.dumps({'error': f'Database error: {str(e)}'})}\n\n"
             return
 
-        # 5. Regenerate AI Response
-        logger.info("Starting AI Regeneration...")
         config = {"configurable": {"thread_id": thread_id}}
         try:
             state = await asyncio.to_thread(app_graph.invoke, {"question": new_content, "thread_id": thread_id}, config)
@@ -319,7 +316,6 @@ class ChatService:
              logger.error(f"AI Stream Error: {e}")
              yield f"data: {json.dumps({'error': f'AI Error: {str(e)}'})}\n\n"
 
-        # 6. Save AI Response
         if full_response:
              try:
                 await asyncio.to_thread(
@@ -331,6 +327,7 @@ class ChatService:
                 logger.error(f"Save AI Response Error: {e}")
                 
         yield "data: [DONE]\n\n"
+
     # --- Frontend APIs ---
 
     @staticmethod
@@ -357,14 +354,9 @@ class ChatService:
 
     @staticmethod
     async def delete_chat(user_id: str, thread_id: str) -> bool:
-        """
-        Deletes a chat and returns True if successful.
-        Uses count='exact' to verify deletion even if no data is returned.
-        """
         try:
             if not db.supabase: return False
             
-            # ✅ UPDATED: Added count='exact'
             res = await asyncio.to_thread(
                 db.supabase.table("chats")
                 .delete(count="exact")
@@ -373,7 +365,6 @@ class ChatService:
                 .execute
             )
             
-            # ✅ UPDATED: Check count instead of data
             if res.count is not None and res.count > 0:
                 return True
             
@@ -384,13 +375,9 @@ class ChatService:
 
     @staticmethod
     async def rename_chat(user_id: str, thread_id: str, new_title: str) -> Optional[dict]:
-        """
-        Renames a chat and returns the updated chat object.
-        """
         try:
             if not db.supabase: return None
             
-            # 1. Update (✅ Removed .select() to fix AttributeError)
             res = await asyncio.to_thread(
                 db.supabase.table("chats")
                 .update({"title": new_title})
@@ -399,12 +386,9 @@ class ChatService:
                 .execute
             )
             
-            # 2. If data is returned immediately (Best Case)
             if res.data and len(res.data) > 0:
                 return res.data[0]
             
-            # 3. Fallback: If update succeeded but returned no data (Fixes 404 error)
-            # We explicitly fetch the row to ensure we return a valid object
             refresh = await asyncio.to_thread(
                  db.supabase.table("chats")
                  .select("id, title, created_at")

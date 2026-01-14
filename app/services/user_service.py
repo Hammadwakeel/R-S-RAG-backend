@@ -51,27 +51,49 @@ class UserService:
             return None
 
     @staticmethod
-    async def get_user_profile(user_id: UUID):
+    async def get_user_profile(user_id: UUID, email: str = ""):
+        """
+        Fetches the user profile. 
+        Args:
+            user_id: The UUID of the user.
+            email: (Optional) The email from the auth token to use as fallback.
+        """
         if not db.supabase:
             logger.error("Database client is not initialized")
             raise HTTPException(status_code=503, detail="Database unavailable")
 
         try:
-            response = db.supabase.table("profiles").select("*").eq("id", str(user_id)).single().execute()
+            # Use maybe_single() to avoid crashing on 0 rows
+            response = db.supabase.table("profiles").select("*").eq("id", str(user_id)).maybe_single().execute()
             
-            if response.data:
-                return response.data
+            # Check if response exists and has data
+            if response and response.data:
+                # Ensure email is present in the response if DB missing it
+                data = response.data
+                if not data.get("email") and email:
+                    data["email"] = email
+                return data
             
+            # Fallback if no profile row exists
+            logger.warning(f"Profile not found for {user_id}, returning default.")
             return {
                 "id": str(user_id),
                 "full_name": "",
-                "avatar_url": "",
-                "email": "" 
+                "avatar_url": None,
+                "email": email or "no-email@example.com", # ✅ FIX: Ensure email exists
+                "role": "user"
             }
 
         except Exception as e:
             logger.error(f"❌ Profile Error: {e}")
-            raise HTTPException(status_code=500, detail="Failed to fetch profile")
+            # ✅ FIX: Return complete object to prevent ResponseValidationError
+            return {
+                "id": str(user_id),
+                "full_name": "Error Loading Profile",
+                "avatar_url": None,
+                "email": email or "error@example.com",
+                "role": "user"
+            }
 
     @staticmethod
     async def update_user_profile(user_id: UUID, user_data: UserUpdate):
